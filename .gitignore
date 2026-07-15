@@ -1,0 +1,27 @@
+# Competition data — not redistributed, source from Kaggle
+data/
+dataset/
+
+# Python environments
+venv/
+venv310/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# macOS
+.DS_Store
+
+# Model artefacts / output (regenerate by running the pipeline)
+reports/baseline/
+reports/stage4/
+catboost_info/
+
+# Editor
+.idea/
+.vscode/
