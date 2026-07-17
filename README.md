@@ -4,125 +4,73 @@
 
 Predict hospital length of stay (`ADMIT_LOS`, in days) from clinical and administrative encounter records.
 
----
-
 ## Competition
 
 - **Platform:** Kaggle / SAS Viya for Learners Challenge 2026
-- **Task:** Regression — predict `ADMIT_LOS` (integer days, range 0–51)
+- **Task:** Regression — predict `ADMIT_LOS` (days, range 0–51)
 - **Metric:** RMSE (lower is better)
 - **Track:** Workbench (code submission)
-
----
 
 ## Results
 
 | Stage | Model | CV RMSE | Kaggle LB |
 |-------|-------|---------|-----------|
 | Baseline | Naive group median | 4.987 | — |
-| Stage 3 | CatBoost admission-only | 2.492 | — |
 | Stage 3 | CatBoost full features | 1.990 | — |
-| Stage 4 | CB + LGB + XGB → Ridge stack | 1.993 | — |
-| Stage 5 | + Optuna tuning + HGBM + new features | 1.982 | 1.96 |
-| Stage 7 | + Rounding fix + 3-seed bagging | 1.978 | 1.947 |
-| **Stage 9A** | **+ OOF TE for DX_CODE, DIAG_SUBCAT, DEPT** | **1.977** | **1.947** |
+| Stage 5 | CB + LGB + XGB + HGBM → Ridge stack, Optuna-tuned | 1.982 | 1.960 |
+| Stage 7 | + Raw-float export + 3-seed bagging | 1.978 | 1.947 |
+| Stage 10C | + OOF target encoding + 5-seed bagging + pseudo-labelling | 1.973 | 1.94486 |
+| + Isotonic | Isotonic calibration on stack OOF | 1.9711 | 1.94478 |
+| **Final** | **3 calibrated stacks (15 seeds) + embedding MLP blend** | **1.9694** | **1.94154** |
 
-**Current leaderboard position: #1**
+**Final leaderboard position: #1**
 
----
+## Final model architecture
 
-## Approach
+The leaderboard submission is a blend of four components:
 
-### Model architecture
+**Three independent stacked ensembles** (`train_stack.py`), identical
+architecture, disjoint seed sets:
 
-Four-model stacked ensemble with Ridge meta-learner:
+- Stack A: seeds [42, 7, 123, 999, 2025]
+- Stack B: seeds [100, 200, 300, 400, 500]
+- Stack C: seeds [555, 1717, 8080, 3141, 9999]
 
-- **CatBoost** (Optuna-tuned, depth=6, lr=0.0405) — native categorical handling
-- **LightGBM** (Optuna-tuned, num_leaves=65, lr=0.0372)
-- **XGBoost** (lr=0.03, max_depth=7)
-- **HistGradientBoosting** (Optuna-tuned, lr=0.0105)
+Each stack: per seed, 5-fold CV training of **CatBoost** (Optuna-tuned,
+depth 6), **LightGBM** (65 leaves), **XGBoost** (depth 7) and
+**HistGradientBoosting** — all on a `log1p` target with fold-safe smoothed
+target encoding (DOCTOR, DX_CODE, DIAGNOSIS_SUBCAT_CODE, DEPARTMENT) and
+pseudo-labelled test rows appended to each fold's training data. Seed-averaged
+OOF predictions feed a **Ridge meta-learner**.
 
-All base models train on `log1p(ADMIT_LOS)` and predictions are recovered via `expm1`. Raw float predictions are used (no integer rounding — rounding costs ~0.020 RMSE on LB).
+**One embedding MLP** (`train_mlp.py`): learned embeddings for all categorical
+columns, standard-scaled numerics, 128→64→32 dense layers with BatchNorm and
+dropout, trained on the same folds. Solo RMSE 2.135 — weaker than the trees,
+but its errors correlate only ~0.925 with the stacks (the stacks correlate
+0.9998 with each other), so it contributes genuine diversity.
 
-### Key design choices
-
-- **3-seed bagging** [42, 7, 123]: each seed produces independent 5-fold CV predictions; OOF and test predictions are averaged across seeds before Ridge stacking. Reduces variance.
-- **OOF target encoding** (fold-safe, smoothing=20):
-  - `DOCTOR` — high-cardinality ID, OOF TE replaces raw value
-  - `DX_CODE_TE` — 55 categories, group-mean std=2.76 (highest signal)
-  - `DIAGNOSIS_SUBCAT_CODE_TE` — 21 categories, group-mean std=2.68
-  - `DEPARTMENT_TE` — 10 categories, group-mean std=2.35 (#1 feature by importance)
-- **Hospital encoding:** frequency encoding (hospital mean LOS has near-zero variance across 39 hospitals; frequency is the useful proxy)
-- **Ridge meta-learner:** fits on OOF predictions with CV RMSE estimate; final coefs CB:0.729, LGB:0.276, XGB:0.105, HGBM:−0.069
-
-### Feature engineering (17 interaction features)
-
-| Feature | Formula |
-|---------|---------|
-| `AGE_x_SEVERITY` | `PATIENT_AGE × DRG_APR_SEVERITY` |
-| `CHRONIC_x_SEVERITY` | `NUM_CHRONIC_COND × DRG_APR_SEVERITY` |
-| `ICU_x_CHRONIC` | `ICU_DAYS × NUM_CHRONIC_COND` |
-| `ICU_x_OPERATION` | `ICU_DAYS × OPERATION_COUNT` |
-| `LOG_CHARGES` | `log1p(ORDER_TOTAL_CHARGES)` |
-| `CHARGE_PER_ICU` | `ORDER_TOTAL_CHARGES / (ICU_DAYS + 1)` |
-| `ICU_DAYS_SQRT` | `sqrt(ICU_DAYS)` |
-| `PATIENT_AGE_SQ` | `PATIENT_AGE²` |
-| `ADMIT_QUARTER` | Quarter from `ADMIT_MTH` |
-| `IS_SUMMER` | 1 if `ADMIT_MTH` ∈ {7,8,9} |
-| `MONITOR_x_ICU` | `MONITORING_HOURS × ICU_DAYS` |
-| `COMORBID_x_SEV` | `COMORBIDITY_INDEX × DRG_APR_SEVERITY` |
-| `TEAM_x_COMORBID` | `CARE_TEAM_SIZE × COMORBIDITY_INDEX` |
-| `LOG_MONITORING` | `log1p(MONITORING_HOURS)` |
-| `MONITOR_PER_COMORBID` | `MONITORING_HOURS / (COMORBIDITY_INDEX + 1)` |
-| `COMORBID_SQ` | `COMORBIDITY_INDEX²` |
-| `TEAM_x_ICU` | `CARE_TEAM_SIZE × ICU_DAYS` |
-
-### Critical finding: rounding penalty
-
-All prior submissions exported `ADMIT_LOS` as rounded integers. Cross-validation was always computed on raw floats. The delta:
-
-- CV RMSE (raw floats): **1.9812**
-- CV RMSE (rounded integers): **2.0017**
-- Rounding penalty: **+0.0205 RMSE** on every prior submission
-
-Switching to raw float export was the single largest confirmed improvement.
-
----
-
-## Repository structure
+**Final blend** (`build_submission.py`): each stack is isotonic-calibrated on
+its own OOF, the three calibrated stacks are averaged, and the calibrated MLP
+is mixed in at weight 0.05 (tuned on cross-validated OOF only):
 
 ```
-sas-viya-2026-submission/
-├── train_and_predict.py     # Full self-contained pipeline
-├── requirements.txt         # Pinned dependencies
-├── submission.csv           # Current best predictions (Stage 9A)
-├── reports/
-│   ├── baseline_report.md   # Full stage-by-stage results and decisions
-│   └── train_eda_report.md  # EDA findings
-└── data/                    # NOT included — download from Kaggle
-    ├── train.csv
-    └── test.csv
+submission = 0.95 * mean(iso(stack_a), iso(stack_b), iso(stack_c)) + 0.05 * iso(mlp)
 ```
-
----
 
 ## Setup
 
 ```bash
 python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-On Apple Silicon (M-series) Macs, CatBoost/LightGBM need the ARM64 OpenMP library:
+On Apple Silicon Macs, CatBoost/LightGBM need the ARM64 OpenMP library:
 
 ```bash
-# If you get "Library not loaded: @rpath/libomp.dylib":
 cp $(brew --prefix libomp)/lib/libomp.dylib venv/lib/libomp.dylib
 export DYLD_LIBRARY_PATH=venv/lib:$DYLD_LIBRARY_PATH
 ```
-
----
 
 ## Data
 
@@ -134,36 +82,48 @@ data/
 └── test.csv
 ```
 
----
-
 ## Running the pipeline
 
-```bash
-python train_and_predict.py
-```
-
-This will:
-1. Load and clean `data/train.csv` and `data/test.csv`
-2. Apply feature engineering (17 interaction features)
-3. Apply fold-safe OOF target encoding per fold
-4. Train CB + LGB + XGB + HGBM across 3 seeds × 5 folds
-5. Fit Ridge meta-learner on seed-averaged OOF predictions
-6. Write raw float predictions (clipped to [0, 51]) to `submission.csv`
-
-**Custom paths:**
+The full pipeline, in order:
 
 ```bash
-python train_and_predict.py --train path/to/train.csv --test path/to/test.csv --out my_submission.csv
+# 1. Bootstrap: train stack A without pseudo-labels, predict test
+python train_stack.py --seeds 42 7 123 999 2025 --tag boot
+
+# 2. Self-training: two rounds of pseudo-labelling with stack A
+python train_stack.py --seeds 42 7 123 999 2025 --tag round1 --pseudo artifacts/preds_boot.csv
+python train_stack.py --seeds 42 7 123 999 2025 --tag stack_a --pseudo artifacts/preds_round1.csv
+
+# 3. Stacks B and C reuse the round-1 pseudo-labels
+python train_stack.py --seeds 100 200 300 400 500 --tag stack_b --pseudo artifacts/preds_round1.csv
+python train_stack.py --seeds 555 1717 8080 3141 9999 --tag stack_c --pseudo artifacts/preds_round1.csv
+
+# 4. Embedding MLP
+python train_mlp.py
+
+# 5. Calibrate, blend, write submission.csv
+python build_submission.py
 ```
 
----
+Each stack run takes roughly 45 minutes on an 8-core machine; the MLP takes
+about 6 minutes.
 
 ## Key findings
 
-- **DEPARTMENT** is the #1 feature by importance (22%) — patients in surgical vs medical departments have dramatically different LOS profiles
-- **Post-admission features** (`ICU_DAYS`, `ORDER_TOTAL_CHARGES`, `DISCHARGED_TO`) drive the majority of signal; removing them degrades RMSE by ~1.1
-- **Integer rounding** costs ~0.020 RMSE on LB — always export raw floats for regression targets
-- `DIAGNOSIS_ICD_CODE` dropped (r=1.000 with `DIAGNOSIS_SUBCAT_CODE`)
-- `DISCH_NURSE_ID` dropped (r=−0.001 in updated dataset — signal collapsed)
-- `HOSPITAL` mean LOS varies only 5.58–5.94 across 39 hospitals — near-zero LOS signal; frequency encoding used instead
-- OOF target encoding for `DX_CODE` (55 categories, group std=2.76) provided the largest untapped categorical signal
+- **DEPARTMENT** is the #1 feature by importance — surgical vs medical
+  departments have dramatically different LOS profiles
+- **Post-admission features** (`ICU_DAYS`, `ORDER_TOTAL_CHARGES`,
+  `DISCHARGED_TO`) drive the majority of signal
+- **Integer rounding costs ~0.020 RMSE** — always export raw floats
+- **OOF target encoding** for DOCTOR/DX_CODE/DIAGNOSIS_SUBCAT_CODE/DEPARTMENT
+  provided the largest categorical signal gain
+- **Pseudo-labelling** (self-training on test predictions) gave +0.005 LB across
+  two rounds; a third round showed zero gain — the technique saturates fast
+- **Isotonic calibration** on stack OOF corrects systematic over-prediction in
+  the 47–51 day tail and under-prediction around 28–33 days
+- **Model diversity beats model count**: adding a 4th correlated tree draw was
+  worth +0.0002; adding one decorrelated MLP at 5% weight was worth ~10x that
+  on the leaderboard
+- `DIAGNOSIS_ICD_CODE` dropped (r=1.000 with `DIAGNOSIS_SUBCAT_CODE`);
+  `DISCH_NURSE_ID` dropped (signal collapsed in the updated dataset);
+  `HOSPITAL` frequency-encoded (near-zero direct LOS signal across 39 hospitals)
