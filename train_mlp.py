@@ -44,6 +44,7 @@ torch.set_num_threads(6)
 class EmbMLP(nn.Module):
     def __init__(self, cat_dims, n_cont):
         super().__init__()
+        # embedding dim rule of thumb: roughly sqrt(n_categories), capped at 50
         self.embs = nn.ModuleList([
             nn.Embedding(n, min(50, (n + 1) // 2)) for n in cat_dims
         ])
@@ -71,7 +72,7 @@ def train_fold(Xc_tr, Xn_tr, y_tr, Xc_vl, Xn_vl, y_vl, cat_dims):
     xn_vl = torch.FloatTensor(Xn_vl)
     y_vl_t = torch.FloatTensor(y_vl)
 
-    best_loss, best_state, bad = float("inf"), None, 0
+    best_loss, best_state, bad = float("inf"), None, 0  # bad = consecutive epochs without improvement
     for epoch in range(MAX_EPOCHS):
         model.train()
         for xc, xn, yb in dl:
@@ -105,9 +106,10 @@ def main():
     Xc_te = np.zeros((len(X_test), len(cat_cols)), dtype=np.int64)
     cat_dims = []
     for i, c in enumerate(cat_cols):
+        # fit categories on train+test together so embedding indices are consistent
         joint = pd.Categorical(pd.concat([X[c], X_test[c]], axis=0).astype(str))
         codes = joint.codes.astype(np.int64)
-        codes[codes < 0] = len(joint.categories)
+        codes[codes < 0] = len(joint.categories)  # unknown categories get an extra "OOV" index
         Xc[:, i] = codes[:len(X)]
         Xc_te[:, i] = codes[len(X):]
         cat_dims.append(int(codes.max()) + 1)
