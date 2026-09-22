@@ -1,4 +1,4 @@
-# SAS Viya for Learners Challenge 2026 / First Place
+# SAS Viya for Learners Challenge 2026 - First Place
 
 **Kaggle Competition · Workbench Track**
 
@@ -7,7 +7,7 @@ Predict hospital length of stay (`ADMIT_LOS`, in days) from clinical and adminis
 ## Competition
 
 - **Platform:** Kaggle / SAS Viya for Learners Challenge 2026
-- **Task:** Regression — predict `ADMIT_LOS` (days, range 0–51)
+- **Task:** Regression - predict `ADMIT_LOS` (days, range 0-51)
 - **Metric:** RMSE (lower is better)
 - **Track:** Workbench (code submission)
 
@@ -15,8 +15,8 @@ Predict hospital length of stay (`ADMIT_LOS`, in days) from clinical and adminis
 
 | Stage | Model | CV RMSE | Kaggle LB |
 |-------|-------|---------|----------|
-| Baseline | Naive group median | 4.987 | — |
-| Stage 3 | CatBoost full features | 1.990 | — |
+| Baseline | Naive group median | 4.987 | - |
+| Stage 3 | CatBoost full features | 1.990 | - |
 | Stage 5 | CB + LGB + XGB + HGBM → Ridge stack, Optuna-tuned | 1.982 | 1.960 |
 | Stage 7 | + Raw-float export + 3-seed bagging | 1.978 | 1.947 |
 | Stage 10C | + OOF target encoding + 5-seed bagging + pseudo-labelling | 1.973 | 1.94486 |
@@ -37,7 +37,7 @@ The winning submission blends four components.
 
 Each stack trains CatBoost (Optuna-tuned, depth 6), LightGBM (65 leaves), XGBoost (depth 7), and HistGradientBoosting across 5 folds on a `log1p` target. Target encoding for DOCTOR, DX_CODE, DIAGNOSIS_SUBCAT_CODE, and DEPARTMENT is computed fold-safely to prevent leakage. Pseudo-labelled test rows are appended to each fold's training data. OOF predictions from all four base models then feed a Ridge meta-learner.
 
-**An embedding MLP** (`train_mlp.py`) trains on the same 5-fold split with learned categorical embeddings, standard-scaled numerics, and a 128→64→32 network with BatchNorm and dropout. Solo RMSE is 2.135 — weaker than the trees, but its errors correlate only ~0.925 with the stacks (vs. 0.9998 between stacks), so it contributes genuine diversity rather than redundancy.
+**An embedding MLP** (`train_mlp.py`) trains on the same 5-fold split with learned categorical embeddings, standard-scaled numerics, and a 128→64→32 network with BatchNorm and dropout. Solo RMSE is 2.135, weaker than the trees, but its errors correlate only ~0.925 with the stacks (vs. 0.9998 between stacks), so it contributes genuine diversity rather than redundancy.
 
 **The blend** (`build_submission.py`): each stack gets isotonic calibration fitted on its own OOF, the three calibrated stacks are averaged, and the calibrated MLP is mixed in at 5% (tuned on cross-validated OOF only):
 
@@ -82,21 +82,21 @@ data/
 ## Running the pipeline
 
 ```bash
-# Step 1 — bootstrap: train stack A without pseudo-labels
+# Step 1 - bootstrap: train stack A without pseudo-labels
 python train_stack.py --seeds 42 7 123 999 2025 --tag boot
 
-# Step 2 — two rounds of self-training on stack A's test predictions
+# Step 2 - two rounds of self-training on stack A's test predictions
 python train_stack.py --seeds 42 7 123 999 2025 --tag round1 --pseudo artifacts/preds_boot.csv
 python train_stack.py --seeds 42 7 123 999 2025 --tag stack_a --pseudo artifacts/preds_round1.csv
 
-# Step 3 — stacks B and C reuse the round-1 pseudo-labels
+# Step 3 - stacks B and C reuse the round-1 pseudo-labels
 python train_stack.py --seeds 100 200 300 400 500 --tag stack_b --pseudo artifacts/preds_round1.csv
 python train_stack.py --seeds 555 1717 8080 3141 9999 --tag stack_c --pseudo artifacts/preds_round1.csv
 
-# Step 4 — embedding MLP
+# Step 4 - embedding MLP
 python train_mlp.py
 
-# Step 5 — calibrate, blend, and write submission.csv
+# Step 5 - calibrate, blend, and write submission.csv
 python build_submission.py
 ```
 
@@ -104,11 +104,11 @@ Each stack run takes roughly 45 minutes on an 8-core machine. The MLP takes abou
 
 ## What actually mattered
 
-- **DEPARTMENT** was the single most important feature — surgical vs. medical departments have dramatically different LOS distributions.
+- **DEPARTMENT** was the single most important feature; surgical vs. medical departments have dramatically different LOS distributions.
 - **Post-admission signals** (`ICU_DAYS`, `ORDER_TOTAL_CHARGES`, `DISCHARGED_TO`) carried most of the predictive weight. These are known at discharge, so they're fair game for the task.
 - **Exporting raw floats** instead of rounded integers was worth ~0.020 RMSE. Always export floats for regression.
 - **OOF target encoding** for DOCTOR, DX_CODE, DIAGNOSIS_SUBCAT_CODE, and DEPARTMENT gave the largest single categorical gain.
-- **Pseudo-labelling saturates at round 2.** Two self-training rounds gave +0.005 LB; a third round did nothing — the model stops learning from its own confident predictions.
+- **Pseudo-labelling saturates at round 2.** Two self-training rounds gave +0.005 LB; a third round did nothing; the model stops learning from its own confident predictions.
 - **Isotonic calibration** fixed systematic over-prediction in the 47–51 day tail and under-prediction around 28–33 days, where the tree models were consistently off.
 - **Diversity beats quantity.** Adding a fourth correlated tree draw was worth +0.0002 on LB; swapping it for one decorrelated MLP at 5% weight was worth roughly 10× that.
-- Dropped columns: `DIAGNOSIS_ICD_CODE` (r=1.000 with `DIAGNOSIS_SUBCAT_CODE`), `DISCH_NURSE_ID` (signal collapsed in the updated dataset), and `HOSPITAL` as a direct feature (near-zero LOS signal across 39 hospitals — kept only as frequency encoding).
+- Dropped columns: `DIAGNOSIS_ICD_CODE` (r=1.000 with `DIAGNOSIS_SUBCAT_CODE`), `DISCH_NURSE_ID` (signal collapsed in the updated dataset), and `HOSPITAL` as a direct feature (near-zero LOS signal across 39 hospitals, kept only as frequency encoding).
