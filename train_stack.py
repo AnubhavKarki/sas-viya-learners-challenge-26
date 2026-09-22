@@ -63,12 +63,14 @@ BASE_ENCODE = [("DOCTOR", 20), ("HOSPITAL", 20)]
 
 
 def smoothed_encode(s_tr, y_tr, s_te, gm, sw):
+    # sw is the smoothing weight: rare categories are pulled toward the global mean
     stats = pd.Series(y_tr, index=s_tr.index).groupby(s_tr.values).agg(["mean", "count"])
     smoothed = (stats["mean"] * stats["count"] + gm * sw) / (stats["count"] + sw)
     return (s_tr.map(smoothed).fillna(gm).values,
             s_te.map(smoothed).fillna(gm).values, smoothed)
 
 
+# called inside each fold so validation rows never touch training labels during encoding
 def apply_target_encoding(X_tr, X_vl, X_te, X_ps, y_tr, raw_tr, raw_vl, raw_te, raw_ps):
     X_tr = X_tr.copy(); X_vl = X_vl.copy(); X_te = X_te.copy(); X_ps = X_ps.copy()
     gm = float(np.mean(y_tr))
@@ -121,6 +123,7 @@ def run_one_seed(X, y, X_test, cat_cols, raw_train, raw_test, y_pseudo, seed):
         oofs["cb"][vl] = np.expm1(m.predict(Pool(X_vl, cat_features=cc)))
         tests["cb"] += np.expm1(m.predict(Pool(X_te, cat_features=cc))) / N_FOLDS
 
+        # LGB needs integer codes; CatBoost handles raw strings natively
         Xl, Xvl, Xte = X_tr_c.copy(), X_vl.copy(), X_te.copy()
         for c in cc:
             Xl[c] = pd.Categorical(Xl[c]).codes
@@ -133,6 +136,7 @@ def run_one_seed(X, y, X_test, cat_cols, raw_train, raw_test, y_pseudo, seed):
         oofs["lgb"][vl] = np.expm1(m.predict(Xvl))
         tests["lgb"] += np.expm1(m.predict(Xte)) / N_FOLDS
 
+        # XGB needs consistent integer codes across train, val, and test within the fold
         Xx, Xxv, Xxe = X_tr_c.copy(), X_vl.copy(), X_te.copy()
         for c in cc:
             codes = pd.Categorical(pd.concat([Xx[c], Xxv[c], Xxe[c]])).codes
@@ -143,6 +147,7 @@ def run_one_seed(X, y, X_test, cat_cols, raw_train, raw_test, y_pseudo, seed):
         oofs["xgb"][vl] = np.expm1(m.predict(Xxv))
         tests["xgb"] += np.expm1(m.predict(Xxe)) / N_FOLDS
 
+        # same joint-encoding trick for HGBM
         Xh, Xhv, Xhe = X_tr_c.copy(), X_vl.copy(), X_te.copy()
         for c in cc:
             codes = pd.Categorical(pd.concat([Xh[c], Xhv[c], Xhe[c]])).codes
