@@ -1,7 +1,12 @@
+# gradient boosting
 catboost==1.2.10
 lightgbm==4.6.0
 xgboost==3.2.0
+
+# scikit-learn, data handling
 scikit-learn==1.7.2
 pandas==2.3.3
 numpy==2.2.6
+
+# embedding MLP
 torch==2.13.0
