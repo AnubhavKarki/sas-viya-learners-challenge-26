@@ -1,4 +1,4 @@
-# SAS Viya for Learners Challenge 2026 — First Place
+# SAS Viya for Learners Challenge 2026 / First Place
 
 **Kaggle Competition · Workbench Track**
 
