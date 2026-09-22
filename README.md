@@ -187,3 +187,9 @@ Each stack run takes roughly 45 minutes on an 8-core machine. The MLP takes abou
 | 1 decorrelated MLP at 5% weight | ~+0.002 |
 
 Once the three tree stacks are correlating at 0.9998 with each other, adding a fourth is almost pure noise. One diverse signal is worth far more.
+
+---
+
+## Closing thoughts
+
+None of the individual techniques here are novel. CatBoost, isotonic calibration, and target encoding are well-documented. What mattered was the combination and the order: getting the data clean first, then feature engineering, then tuning, then stacking, then calibrating - and not skipping ahead. Every leaderboard gain in the results table came from one deliberate change, not a batch of simultaneous tweaks, which made it possible to know exactly what was working.
