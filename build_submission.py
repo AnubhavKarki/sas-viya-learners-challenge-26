@@ -23,11 +23,13 @@ KF = KFold(n_splits=5, shuffle=True, random_state=42)
 
 
 def calibrate(oof_pred, y, test_pred):
+    # out_of_bounds="clip" handles test predictions outside the training range
     iso = IsotonicRegression(out_of_bounds="clip").fit(oof_pred, y)
     return np.clip(iso.predict(test_pred), 0, 51)
 
 
 def honest_calibrated_oof(oof_pred, y):
+    # cross-validate the isotonic fit so the calibrated OOF doesn't overfit its own labels
     cal = np.zeros(len(y))
     for tr, vl in KF.split(oof_pred.reshape(-1, 1)):
         iso = IsotonicRegression(out_of_bounds="clip").fit(oof_pred[tr], y[tr])
