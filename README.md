@@ -27,22 +27,69 @@ Predict hospital length of stay (`ADMIT_LOS`, in days) from clinical and adminis
 
 ## Architecture
 
-The winning submission blends four components.
+The final submission blends four components: three independent tree stacks and one embedding MLP.
 
-**Three stacked ensembles** (`train_stack.py`), same architecture, disjoint seed sets:
+---
 
-- Stack A: [42, 7, 123, 999, 2025]
-- Stack B: [100, 200, 300, 400, 500]
-- Stack C: [555, 1717, 8080, 3141, 9999]
+### 1. Tree Stacks (`train_stack.py`)
 
-Each stack trains CatBoost (Optuna-tuned, depth 6), LightGBM (65 leaves), XGBoost (depth 7), and HistGradientBoosting across 5 folds on a `log1p` target. Target encoding for DOCTOR, DX_CODE, DIAGNOSIS_SUBCAT_CODE, and DEPARTMENT is computed fold-safely to prevent leakage. Pseudo-labelled test rows are appended to each fold's training data. OOF predictions from all four base models then feed a Ridge meta-learner.
+Three stacks trained with the same architecture but disjoint seed sets to maximise ensemble diversity:
 
-**An embedding MLP** (`train_mlp.py`) trains on the same 5-fold split with learned categorical embeddings, standard-scaled numerics, and a 128→64→32 network with BatchNorm and dropout. Solo RMSE is 2.135, weaker than the trees, but its errors correlate only ~0.925 with the stacks (vs. 0.9998 between stacks), so it contributes genuine diversity rather than redundancy.
+| Stack | Seeds |
+|-------|-------|
+| A | 42, 7, 123, 999, 2025 |
+| B | 100, 200, 300, 400, 500 |
+| C | 555, 1717, 8080, 3141, 9999 |
 
-**The blend** (`build_submission.py`): each stack gets isotonic calibration fitted on its own OOF, the three calibrated stacks are averaged, and the calibrated MLP is mixed in at 5% (tuned on cross-validated OOF only):
+Each stack runs 5-fold CV per seed with four base models:
+
+| Model | Key settings |
+|-------|--------------|
+| CatBoost | Optuna-tuned, depth 6, 5000 iterations |
+| LightGBM | 65 leaves, learning rate 0.037 |
+| XGBoost | depth 7, learning rate 0.03, hist method |
+| HistGradientBoosting | 31 leaf nodes, learning rate 0.010 |
+
+**Training assumptions and design choices:**
+
+- Target is `log1p`-transformed before training and back-transformed after; this compresses the long tail and stabilises tree splits.
+- Target encoding for `DOCTOR`, `DX_CODE`, `DIAGNOSIS_SUBCAT_CODE`, and `DEPARTMENT` is computed inside each fold to prevent any leakage from validation rows.
+- Pseudo-labelled test rows (from the previous bootstrap run) are appended to each fold's training data during self-training rounds.
+- OOF predictions from all four base models are stacked as features for a Ridge meta-learner, which outputs the final stack prediction.
+- Seed-averaged OOF and test predictions are used before stacking to reduce variance across the 5 seeds.
+
+---
+
+### 2. Embedding MLP (`train_mlp.py`)
+
+A neural network trained on the same 5-fold split as the tree stacks.
+
+**Architecture:**
+```
+Categorical columns  ->  Learned embeddings (dim = min(50, (n+1)//2))
+Numeric columns      ->  StandardScaler per fold
+                              |
+                        Concatenate
+                              |
+                     Linear(128) -> BatchNorm -> ReLU -> Dropout(0.25)
+                     Linear(64)  -> BatchNorm -> ReLU -> Dropout(0.25)
+                     Linear(32)  -> BatchNorm -> ReLU
+                     Linear(1)
+```
+
+**Why include it if the RMSE is worse (2.135 vs. ~1.97)?**
+The MLP's prediction errors correlate only ~0.925 with the tree stacks, whereas the three stacks correlate 0.9998 with each other. That low correlation means the MLP is making different mistakes, which is exactly what you want from a blend component.
+
+---
+
+### 3. Final Blend (`build_submission.py`)
+
+Each stack is isotonic-calibrated on its own OOF before blending. Isotonic regression corrects the systematic shape errors the Ridge meta-learner can't fix (over-prediction in the 47-51 day tail, under-prediction around 28-33 days).
+
+The MLP blend weight (5%) was tuned on cross-validated OOF only, never on leaderboard feedback.
 
 ```
-submission = 0.95 × mean(iso(stack_a), iso(stack_b), iso(stack_c)) + 0.05 × iso(mlp)
+submission = 0.95 * mean(iso(stack_a), iso(stack_b), iso(stack_c)) + 0.05 * iso(mlp)
 ```
 
 ## Files
@@ -104,11 +151,39 @@ Each stack run takes roughly 45 minutes on an 8-core machine. The MLP takes abou
 
 ## What actually mattered
 
-- **DEPARTMENT** was the single most important feature; surgical vs. medical departments have dramatically different LOS distributions.
-- **Post-admission signals** (`ICU_DAYS`, `ORDER_TOTAL_CHARGES`, `DISCHARGED_TO`) carried most of the predictive weight. These are known at discharge, so they're fair game for the task.
-- **Exporting raw floats** instead of rounded integers was worth ~0.020 RMSE. Always export floats for regression.
-- **OOF target encoding** for DOCTOR, DX_CODE, DIAGNOSIS_SUBCAT_CODE, and DEPARTMENT gave the largest single categorical gain.
-- **Pseudo-labelling saturates at round 2.** Two self-training rounds gave +0.005 LB; a third round did nothing; the model stops learning from its own confident predictions.
-- **Isotonic calibration** fixed systematic over-prediction in the 47–51 day tail and under-prediction around 28–33 days, where the tree models were consistently off.
-- **Diversity beats quantity.** Adding a fourth correlated tree draw was worth +0.0002 on LB; swapping it for one decorrelated MLP at 5% weight was worth roughly 10× that.
-- Dropped columns: `DIAGNOSIS_ICD_CODE` (r=1.000 with `DIAGNOSIS_SUBCAT_CODE`), `DISCH_NURSE_ID` (signal collapsed in the updated dataset), and `HOSPITAL` as a direct feature (near-zero LOS signal across 39 hospitals, kept only as frequency encoding).
+### Features
+
+**DEPARTMENT** was the single most important feature by a wide margin. Surgical and medical departments have dramatically different LOS distributions, and the model leans on it heavily.
+
+**Post-admission signals** (`ICU_DAYS`, `ORDER_TOTAL_CHARGES`, `DISCHARGED_TO`) carried the majority of predictive weight. These are known at discharge, which makes them fair game for the task.
+
+**OOF target encoding** for `DOCTOR`, `DX_CODE`, `DIAGNOSIS_SUBCAT_CODE`, and `DEPARTMENT` gave the largest single categorical gain over one-hot or label encoding.
+
+**Dropped columns and why:**
+
+| Column | Reason dropped |
+|--------|----------------|
+| `DIAGNOSIS_ICD_CODE` | r = 1.000 with `DIAGNOSIS_SUBCAT_CODE` - pure duplicate |
+| `DISCH_NURSE_ID` | Signal collapsed completely in the updated dataset |
+| `HOSPITAL` (direct) | Near-zero LOS signal across 39 hospitals; kept as frequency encoding instead |
+
+---
+
+### Modelling
+
+**Exporting raw floats** instead of rounded integers was worth ~0.020 RMSE on its own. Integer-rounding a continuous regression output is a silent, easy-to-miss mistake.
+
+**Pseudo-labelling saturates fast.** Two self-training rounds gave +0.005 LB improvement. A third round showed zero gain - once the model is confident enough in its own test predictions, there's nothing new to learn from them.
+
+**Isotonic calibration** fixed the two systematic shape errors the meta-learner couldn't correct:
+- Over-prediction in the 47-51 day range
+- Under-prediction around 28-33 days
+
+**Diversity beats quantity.** This was the most surprising finding:
+
+| Addition | LB gain |
+|----------|---------|
+| 4th correlated tree stack | +0.0002 |
+| 1 decorrelated MLP at 5% weight | ~+0.002 |
+
+Once the three tree stacks are correlating at 0.9998 with each other, adding a fourth is almost pure noise. One diverse signal is worth far more.
