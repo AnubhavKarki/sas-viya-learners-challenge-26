@@ -43,6 +43,7 @@ CAT_COLS = [
 
 
 def clean(df):
+    # severity arrives as a string with stray dots in some exports
     if df["DRG_APR_SEVERITY"].dtype == object:
         df["DRG_APR_SEVERITY"] = (
             df["DRG_APR_SEVERITY"].str.strip().replace(".", np.nan)
@@ -51,7 +52,7 @@ def clean(df):
     else:
         df["DRG_APR_SEVERITY"] = df["DRG_APR_SEVERITY"].astype("float64")
     df["NUM_CHRONIC_COND"] = pd.to_numeric(df["NUM_CHRONIC_COND"], errors="coerce")
-    df["ORDER_TOTAL_CHARGES"] = df["ORDER_TOTAL_CHARGES"].replace(-2104, np.nan)
+    df["ORDER_TOTAL_CHARGES"] = df["ORDER_TOTAL_CHARGES"].replace(-2104, np.nan)  # -2104 is a sentinel for missing charges in the raw export
     df["HAS_PROCEDURE"] = (df["OPERATION_COUNT"] > 0).astype(int)
     df["DRG_APR_CODE"] = pd.to_numeric(df["DRG_APR_CODE"], errors="coerce")
     for col in df.select_dtypes(include="object").columns:
@@ -64,6 +65,7 @@ def engineer_features(df):
     sev = df["DRG_APR_SEVERITY"].fillna(2)
     cc = df["NUM_CHRONIC_COND"].fillna(0)
     icu = df["ICU_DAYS"]
+    # df.get() gracefully handles columns that appear only in one of train/test
     mh = df.get("MONITORING_HOURS", pd.Series(0, index=df.index)).fillna(0)
     ci = df.get("COMORBIDITY_INDEX", pd.Series(0, index=df.index)).fillna(0)
     cts = df.get("CARE_TEAM_SIZE", pd.Series(1, index=df.index)).fillna(1)
@@ -104,8 +106,9 @@ def load_data(pseudo_pred_path=None):
     train = engineer_features(train)
     test = engineer_features(test)
 
+    # HOSPITAL has near-zero direct LOS signal; frequency counts act as a soft size proxy
     hosp_freq = train["HOSPITAL"].value_counts().to_dict()
-    med_hosp = float(np.median(list(hosp_freq.values())))
+    med_hosp = float(np.median(list(hosp_freq.values())))  # fallback for hospitals unseen at test time
     for df in [train, test]:
         df["HOSPITAL_freq"] = df["HOSPITAL"].map(hosp_freq).fillna(med_hosp)
 
